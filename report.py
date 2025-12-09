@@ -274,12 +274,8 @@ absolute_filtered_corr = filtered_corr.abs()
 # ordered correlation by absolute value
 absolute_filtered_corr = absolute_filtered_corr.sort_values(ascending=False)
 
-print(f"\nTop 10 correlated features with Attrition:\n{absolute_filtered_corr.head(10)}")
-print(f"\nfeatures above the mean:\n{absolute_filtered_corr[absolute_filtered_corr > absolute_filtered_corr.mean()]}")
-print(f"\nMEAN : \n{absolute_filtered_corr.mean()}" )
-print(f"\nSTD : \n{absolute_filtered_corr.std()}" )
-
-
+top_n_correlated = absolute_filtered_corr.where(absolute_filtered_corr > absolute_filtered_corr.mean(), None).dropna()
+print(f"\nTop {len(top_n_correlated)} correlated features with Attrition:\n{top_n_correlated}")
 
 day_of_week_corr = corr_values[[col for col in corr_values.index if 'day' in col and ('worked_on' in col or 'avg_hours' in col)]]
 if len(day_of_week_corr) > 0:
