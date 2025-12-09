@@ -267,8 +267,8 @@ def order_correlation(corr_series , ascending=False):
 
 positive_ordered_corr = order_correlation(positive_corr, ascending=False)
 negative_ordered_corr = order_correlation(negative_corr, ascending=False)
-print(f"\nTop 10 positively correlated features with Attrition:\n{positive_ordered_corr}")
-print(f"\nTop 10 negatively correlated features with Attrition:\n{negative_ordered_corr}")
+print(f"\n positively correlated features with Attrition:\n{positive_ordered_corr}")
+print(f"\n negatively correlated features with Attrition:\n{negative_ordered_corr}")
 
 absolute_filtered_corr = filtered_corr.abs()
 # ordered correlation by absolute value
