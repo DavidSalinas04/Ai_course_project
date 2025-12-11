@@ -230,7 +230,7 @@ mi_columns = ["Department", "EducationField", "JobRole"]
 #Correlation verification
 ##############################
 
-def annova_mi_with_target(data, target_column, exclude_patterns=None ,anova_columns=None, mi_columns=None):
+def annova_mi_with_target(data, target_column, exclude_patterns=None):
     """
     Calculate feature importance using:
     - ANOVA F-statistic when target is categorical/binary
@@ -244,15 +244,15 @@ def annova_mi_with_target(data, target_column, exclude_patterns=None ,anova_colu
     scores = {}
     
     # Auto-detect column types if not specified
-    if anova_columns is None:
-        anova_columns = data_copy.select_dtypes(include=[np.number]).columns.tolist()
-        if target_column in anova_columns:
-            anova_columns.remove(target_column)
+    anova_columns = data_copy.select_dtypes(include=[np.number]).columns.tolist()
+    anova_columns.remove(target_column) if target_column in anova_columns else None
+    anova_columns.remove("EmployeeID") if "EmployeeID" in anova_columns else None
+    if target_column in anova_columns:
+        anova_columns.remove(target_column)
     
-    if mi_columns is None:
-        mi_columns = data_copy.select_dtypes(include=['object', 'category']).columns.tolist()
-        if target_column in mi_columns:
-            mi_columns.remove(target_column)
+    mi_columns = data_copy.select_dtypes(include=['object', 'category']).columns.tolist()
+    if target_column in mi_columns:
+        mi_columns.remove(target_column)
     
     for col in anova_columns:
         valid_idx = data_copy[[col, target_column]].dropna().index
@@ -286,15 +286,10 @@ def annova_mi_with_target(data, target_column, exclude_patterns=None ,anova_colu
     ordered_cols = scores_series.index.tolist()
     return ordered_cols, scores_series, filtered_scores
 
-numeric_cols = final_dataset.select_dtypes(include=[np.number]).columns.tolist()
-categotrical_cols = final_dataset.select_dtypes(include=['object', 'category']).columns.tolist()
-
 ordered_cols, corr_values, filtered_corr = annova_mi_with_target(
     final_dataset, 
     "Attrition",
     exclude_patterns=["Attrition", r'\d{4}-\d{2}-\d{2}_hours', r'avg_hours_day_\d+', r'worked_on_day_\d+'],
-    anova_columns=numeric_cols,
-    mi_columns=categotrical_cols
 )
 
 
