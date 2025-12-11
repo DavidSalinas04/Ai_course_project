@@ -9,6 +9,8 @@ import sklearn
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_classif, mutual_info_classif
 
+warnings.filterwarnings('ignore')
+
 
 folder_path = 'data/'
 employee_file_name = 'employee_survey_data.csv'
