@@ -205,7 +205,7 @@ final_dataset = preprocess_data(final_dataset,
                                 encode_ordinal_cols=ordinal_mappings,
                                 encode_onehot_cols=True,
                                 remove_constant_cols=True,
-                                remove_from_encoding=['Attrition']
+                                remove_from_encoding=['Attrition','EducationField','Department','JobRole']
                                 )
 
 #######################
@@ -225,101 +225,77 @@ mi_columns = ["Department", "EducationField", "JobRole"]
 
 def annova_mi_with_target(data, target_column, exclude_patterns=None):
     """
-    Calculate feature importance using:
-    - ANOVA F-statistic when target is categorical/binary
-    - Correlation when target is continuous
+    Calculate feature importance using ANOVA F-statistic and Mutual Information
     """
-    # Make a copy to avoid modifying original data
     data_copy = data.copy()
-    
-    # Check if target is categorical or numeric
     target_data = data_copy[target_column]
-    scores = {}
+    anova_scores = {}
+    mi_scores = {}
     
-    # Auto-detect column types if not specified
+    # Get numeric columns for ANOVA
     anova_columns = data_copy.select_dtypes(include=[np.number]).columns.tolist()
-    anova_columns.remove(target_column) if target_column in anova_columns else None
-    anova_columns.remove("EmployeeID") if "EmployeeID" in anova_columns else None
-    if target_column in anova_columns:
-        anova_columns.remove(target_column)
+    anova_columns = [col for col in anova_columns if col not in [target_column, "EmployeeID"]]
     
+    # Get categorical columns for MI
     mi_columns = data_copy.select_dtypes(include=['object', 'category']).columns.tolist()
-    if target_column in mi_columns:
-        mi_columns.remove(target_column)
+    mi_columns = [col for col in mi_columns if col != target_column]
     
+    # Calculate ANOVA scores
     for col in anova_columns:
         valid_idx = data_copy[[col, target_column]].dropna().index
         X_col = data_copy.loc[valid_idx, col].values.reshape(-1, 1)
         y_col = data_copy.loc[valid_idx, target_column].values
-        # Use ANOVA F-statistic for classification tasks
         f_stat, _ = f_classif(X_col, y_col)
-        scores[col] = f_stat[0]
-    for col in mi_columns:
-        # Encode categorical feature
-        encoded_col = pd.Categorical(data_copy[col]).codes
-        # Use mutual information for categorical vs categorical
-        mi_score = mutual_info_classif(encoded_col.reshape(-1, 1), target_data, random_state=42)[0]
-        scores[col] = mi_score
-    
-    # Convert to Series and sort
-    scores_series = pd.Series(scores).sort_values(ascending=False)
-    # Exclude columns based on patterns
-    if exclude_patterns:
-        filtered_scores = scores_series.copy()
-        for pattern in exclude_patterns:
-            filtered_scores = filtered_scores[~filtered_scores.index.str.contains(pattern, regex=True)]
-    else:
-        filtered_scores = scores_series.copy()
-        
-    # standardize scores
-    if not filtered_scores.empty:
-        standardized_values = StandardScaler().fit_transform(filtered_scores.values.reshape(-1, 1)).flatten()
-        filtered_scores = pd.Series(standardized_values, index=filtered_scores.index)
-    
-    ordered_cols = scores_series.index.tolist()
-    return ordered_cols, scores_series, filtered_scores
+        anova_scores[col] = f_stat[0]
 
-ordered_cols, corr_values, filtered_corr = annova_mi_with_target(
+    # Calculate MI scores
+    for col in mi_columns:
+        encoded_col = pd.Categorical(data_copy[col]).codes
+        mi_score = mutual_info_classif(encoded_col.reshape(-1, 1), target_data, random_state=42)[0]
+        mi_scores[col] = mi_score
+    
+    # Convert to sorted Series (easier to work with than dicts)
+    anova_series = pd.Series(anova_scores).sort_values(ascending=False)
+    mi_series = pd.Series(mi_scores).sort_values(ascending=False)
+    
+    # Filter based on exclude patterns
+    if exclude_patterns:
+        anova_series = anova_series[~anova_series.index.str.contains('|'.join(exclude_patterns), regex=True)]
+        mi_series = mi_series[~mi_series.index.str.contains('|'.join(exclude_patterns), regex=True)]
+    
+    # No need to return both list and Series - caller can get list with .index.tolist()
+    return anova_series, mi_series
+
+anova_filtered_scores, mi_filtered_scores = annova_mi_with_target(
     final_dataset, 
     "Attrition",
-    exclude_patterns=["Attrition", r'\d{4}-\d{2}-\d{2}_hours', r'avg_hours_day_\d+', r'worked_on_day_\d+'],
+    exclude_patterns=['EmployeeID', 'day_of_week', 'avg_hours_day_', r'\d{4}-\d{2}-\d{2}_hours']
 )
 
+print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
+print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
 
 #########
 # Display
 #########
 
-# positive correlation
-positive_corr = filtered_corr[filtered_corr > 0]
-# negative correlation
-negative_corr = filtered_corr[filtered_corr < 0]
-
 def order_correlation(corr_series , ascending=False):
-    absolute_corr = corr_series.abs()
-    ordered_corr = absolute_corr.sort_values(ascending=ascending)
+    ordered_corr = corr_series.sort_values(ascending=ascending)
     return ordered_corr
 
 
-positive_ordered_corr = order_correlation(positive_corr, ascending=False)
-negative_ordered_corr = order_correlation(negative_corr, ascending=False)
-print(f"\npositively related features with Attrition:\n{positive_ordered_corr}")
-print(f"\nnegatively related features with Attrition:\n{negative_ordered_corr}")
+# absolute_filtered_corr = filtered_corr.abs()
+# # ordered correlation by absolute value
+# absolute_filtered_corr = filtered_corr.sort_values(ascending=False)
 
-absolute_filtered_corr = filtered_corr.abs()
-# ordered correlation by absolute value
-absolute_filtered_corr = filtered_corr.sort_values(ascending=False)
+# top_n_related = absolute_filtered_corr.where(absolute_filtered_corr > absolute_filtered_corr.mean(), None).dropna()
+# print(f"\nTop {len(top_n_related)} related features with Attrition:\n{top_n_related}")
 
-top_n_related = absolute_filtered_corr.where(absolute_filtered_corr > absolute_filtered_corr.mean(), None).dropna()
-print(f"\nTop {len(top_n_related)} related features with Attrition:\n{top_n_related}")
+# day_of_week_corr = corr_values[[col for col in corr_values.index if 'day' in col and ('worked_on' in col or 'avg_hours' in col)]]
+# if len(day_of_week_corr) > 0:
+#     # Standardize the values
+#     standardized_values = StandardScaler().fit_transform(day_of_week_corr.values.reshape(-1, 1)).flatten()
+#     day_of_week_corr = pd.Series(standardized_values, index=day_of_week_corr.index)
+#     print(f"\nDay-of-week correlations with Attrition:\n{day_of_week_corr}")
 
-day_of_week_corr = corr_values[[col for col in corr_values.index if 'day' in col and ('worked_on' in col or 'avg_hours' in col)]]
-if len(day_of_week_corr) > 0:
-    # Standardize the values
-    standardized_values = StandardScaler().fit_transform(day_of_week_corr.values.reshape(-1, 1)).flatten()
-    day_of_week_corr = pd.Series(standardized_values, index=day_of_week_corr.index)
-    print(f"\nDay-of-week correlations with Attrition:\n{day_of_week_corr}")
-
-final_dataset = final_dataset[ordered_cols]
-
-print(final_dataset.info())
+# final_dataset = final_dataset[ordered_cols]
