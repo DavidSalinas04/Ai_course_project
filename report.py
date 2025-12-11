@@ -7,6 +7,8 @@ import tarfile
 import os
 import sklearn
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import f_classif, mutual_info_classif
+
 
 folder_path = 'data/'
 employee_file_name = 'employee_survey_data.csv'
@@ -191,46 +193,47 @@ final_dataset = final_dataset[cols]
 # print(final_dataset.head())
 
 #into pipeline
-preprocess_data(final_dataset,
-                impute_values=True,
-                scale_data=True,
-                encode_onehot_cols=True,
-                remove_constant_cols=True,
-                remove_from_encoding=['Attrition']
-                )
+ordinal_mappings = {
+    'Education': ['Below College', 'College', 'Bachelor', 'Master', 'Doctor'],
+    'EnvironmentSatisfaction': ['Low', 'Medium', 'High', 'Very High'],
+    'JobInvolvement': ['Low', 'Medium', 'High', 'Very High'],
+    'JobSatisfaction': ['Low', 'Medium', 'High', 'Very High'],
+    'PerformanceRating': ['Low', 'Good', 'Excellent', 'Outstanding'],
+    'BusinessTravel': ['Non-Travel', 'Travel_Rarely', 'Travel_Frequently'],
+    'WorkLifeBalance': ['Bad', 'Good', 'Better', 'Best'],
+    }
 
+final_dataset = preprocess_data(final_dataset,
+                                impute_values=True,
+                                scale_data=True,
+                                encode_onehot_cols=True,
+                                remove_constant_cols=True,
+                                remove_from_encoding=['Attrition']
+                                )
 
 ##############################
 #Correlation verification
 ##############################
 
 print(final_dataset.info())
-from sklearn.feature_selection import f_classif, mutual_info_classif
 
-def correlation_anova_mutual_info_with_target(data, target_column, exclude_patterns=None):
+def annova_mi_with_target(data, target_column, exclude_patterns=None ,anova_columns=None, mi_columns=None):
     """
-    Calculate feature importance using correlation (for numeric features), 
-    ANOVA F-statistic (for categorical features), or Mutual Information.
-    
-    Returns scores for each feature based on their relationship with the target.
+    Calculate feature importance using:
+    - ANOVA F-statistic when target is categorical/binary
+    - Correlation when target is continuous
     """
     # Make a copy to avoid modifying original data
     data_copy = data.copy()
     
     # Check if target is categorical or numeric
-    target_is_categorical = data_copy[target_column].dtype == 'object' or data_copy[target_column].nunique() <= 10
+    target_data = data_copy[target_column]
+    scores = {}
     
-    if target_is_categorical:
-        # Encode categorical target for classification methods
-        if data_copy[target_column].dtype == 'object':
-            unique_vals = data_copy[target_column].unique()
-            if set(unique_vals).issubset({'Yes', 'No', np.nan}):
-                data_copy[target_column] = data_copy[target_column].map({'Yes': 1, 'No': 0})
-            else:
-                data_copy[target_column] = pd.Categorical(data_copy[target_column]).codes
-        
-        y = data_copy[target_column]
-        scores = {}
+    anova_columns data_copy[mi_columns]
+    
+    
+    
         
         # Get numeric and categorical columns
         numeric_cols = data_copy.select_dtypes(include=[np.number]).columns.tolist()
@@ -238,13 +241,17 @@ def correlation_anova_mutual_info_with_target(data, target_column, exclude_patte
         
         categorical_cols = data_copy.select_dtypes(include=['object']).columns.tolist()
         
-        # For numeric features: use correlation or ANOVA F-statistic
+        # For classification (categorical target): use ANOVA F-statistic for ALL numeric features
         for col in numeric_cols:
-            # Use absolute correlation as score
-            correlation = data_copy[[col, target_column]].corr().iloc[0, 1]
-            scores[col] = abs(correlation)
+            valid_idx = data_copy[[col, target_column]].dropna().index
+            X_col = data_copy.loc[valid_idx, col].values.reshape(-1, 1)
+            y_col = data_copy.loc[valid_idx, target_column].values
+            
+            # Use ANOVA F-statistic for classification tasks
+            f_stat, _ = f_classif(X_col, y_col)
+            scores[col] = f_stat[0]
         
-        # For categorical features: use ANOVA or Mutual Information
+        # For categorical features: use Mutual Information
         for col in categorical_cols:
             # Encode categorical feature
             encoded_col = pd.Categorical(data_copy[col]).codes
@@ -253,7 +260,7 @@ def correlation_anova_mutual_info_with_target(data, target_column, exclude_patte
             scores[col] = mi_score
     
     else:
-        # Target is numeric - use correlation for all numeric features
+        # Target is numeric - use correlation for continuous features
         numeric_data = data_copy.select_dtypes(include=[np.number])
         const_cols = [col for col in numeric_data.columns if col != target_column and numeric_data[col].nunique(dropna=True) <= 1]
         if const_cols:
@@ -261,7 +268,8 @@ def correlation_anova_mutual_info_with_target(data, target_column, exclude_patte
         
         correlation = numeric_data.corr()[target_column].abs()
         scores = correlation.to_dict()
-        del scores[target_column]  # Remove target from scores
+        if target_column in scores:
+            del scores[target_column]  # Remove target from scores
     
     # Convert to Series and sort
     scores_series = pd.Series(scores).sort_values(ascending=False)
@@ -271,56 +279,14 @@ def correlation_anova_mutual_info_with_target(data, target_column, exclude_patte
         filtered_scores = scores_series[~scores_series.index.str.contains('|'.join(exclude_patterns), regex=True)]
     else:
         filtered_scores = scores_series
+        
+    filtered_scores = (filtered_scores - filtered_scores.mean()) / filtered_scores.std()
     
     ordered_cols = scores_series.index.tolist()
     return ordered_cols, scores_series, filtered_scores
 
-
-
-# Correlation verification between a target feature and others
-def correlation_with_target(data, target_column, exclude_patterns=None):
-    # Make a copy to avoid modifying original data
-    data_copy = data.copy()
-    
-    # If target column is not numeric, try to encode it
-    if target_column in data_copy.columns and data_copy[target_column].dtype == 'object':
-        # Map Yes/No to 1/0, or use label encoding for other categorical values
-        unique_vals = data_copy[target_column].unique()
-        if set(unique_vals).issubset({'Yes', 'No', np.nan}):
-            data_copy[target_column] = data_copy[target_column].map({'Yes': 1, 'No': 0})
-        else:
-            # For other categorical values, use numeric encoding
-            data_copy[target_column] = pd.Categorical(data_copy[target_column]).codes
-    
-    # Select only numeric columns for correlation
-    numeric_data = data_copy.select_dtypes(include=[np.number])
-    
-    # remove constant numeric or NaN
-    const_cols = [col for col in numeric_data.columns if col != target_column and numeric_data[col].nunique(dropna=True) <= 1]
-    if const_cols:
-        numeric_data = numeric_data.drop(columns=const_cols)
-    
-    if target_column not in numeric_data.columns:
-        raise ValueError(f"Target column '{target_column}' could not be converted to numeric or does not exist")
-    
-    correlation = numeric_data.corr()[target_column].sort_values(ascending=False)
-    
-    if exclude_patterns:
-        filtered_correlation = correlation[~correlation.index.str.contains('|'.join(exclude_patterns), regex=True)]
-    else:
-        filtered_correlation = correlation
-    
-    corelation_ordered = correlation.index.tolist()
-    return corelation_ordered, correlation, filtered_correlation
-
-# ordered_cols, corr_values, filtered_corr = correlation_with_target(
-#     final_dataset, 
-#     "Attrition",
-#     exclude_patterns=["Attrition", r'\d{4}-\d{2}-\d{2}_hours', r'avg_hours_day_\d+', r'worked_on_day_\d+']
-# )
-
-ordered_cols, corr_values, filtered_corr = correlation_anova_mutual_info_with_target(
-    final_dataset,
+ordered_cols, corr_values, filtered_corr = annova_mi_with_target(
+    final_dataset, 
     "Attrition",
     exclude_patterns=["Attrition", r'\d{4}-\d{2}-\d{2}_hours', r'avg_hours_day_\d+', r'worked_on_day_\d+']
 )
