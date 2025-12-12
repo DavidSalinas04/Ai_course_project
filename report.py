@@ -1,15 +1,19 @@
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-import warnings
+import numpy as np
 import os
+import pandas as pd
+import time
+import warnings
 import sklearn
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_classif, mutual_info_classif
 from sklearn.model_selection import cross_val_score
-from sklearn.linear_model import Perceptron
 from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score, roc_curve, auc
+
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.linear_model import LogisticRegression, Perceptron, SGDClassifier
+from sklearn.naive_bayes import BernoulliNB
+from sklearn.svm import LinearSVC, NuSVC
 
 warnings.filterwarnings("ignore")
 
@@ -32,7 +36,7 @@ out_time_data = pd.read_csv(os.path.join(folder_path, time_folder_path, out_time
 
 
 ##############################
-# TIME
+# in_out_time
 ##############################
 
 # merge in_time and out_time data on the first column (Unknown that is actually EmployeeID)
@@ -266,6 +270,9 @@ anova_filtered_scores, mi_filtered_scores = anova_mi_with_target(
     exclude_patterns=["EmployeeID", "day_of_week", "avg_hours_day_", r"\d{4}-\d{2}-\d{2}_hours"]
     )
 
+print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
+print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
+
 # Ensure Attrition is numeric
 if final_dataset[target_col].dtype == "object":
     final_dataset[target_col] = final_dataset[target_col].apply(lambda x: 1 if str(x).lower() in ["yes", "1"] else 0)
@@ -277,55 +284,71 @@ y = final_dataset[target_col]
 # Split processed data
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state, stratify=y)
 
-print(f"\nTraining with processed data. Shape: {X_train.shape}")
 
-perceptron = Perceptron(max_iter=2000, random_state=random_state)
-# Train the model
-perceptron.fit(X_train, y_train)
+###########
+# Training
+###########
 
+models = {
+    "LinearDiscriminantAnalysis": LinearDiscriminantAnalysis(),
+    "LogisticRegression": LogisticRegression(max_iter=10000, random_state=random_state),
+    "Perceptron": Perceptron(max_iter=10000, random_state=random_state),
+    "SGDClassifier": SGDClassifier(max_iter=10000, random_state=random_state),
+    "BernoulliNB": BernoulliNB(),
+    "LinearSVC": LinearSVC(dual=False, max_iter=5000, random_state=random_state),
+    "NuSVC": NuSVC(gamma="scale", max_iter=1000, nu=0.05, probability=True, random_state=random_state),
+    }
 
-##########
-# Display
-##########
+for name, m in models.items():
+    print("\n----------------------------")
+    print(f"{name} model:")
+    t_start = time.time()
+    m.fit(X_train, y_train)
+    x_val_scores = cross_val_score(m, X_train, y_train, cv=5, scoring="accuracy")
+    print(f"Cross-validation mean {x_val_scores.mean()}, std dev {x_val_scores.std()}")
+    
+    y_pred = m.predict(X_test)
+    
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
 
-print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
-print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred))
 
-# Cross validation
-scores = cross_val_score(perceptron, X_train, y_train, cv=5, scoring="accuracy")
-print("\n--- Cross Validation ---")
-print("scores: ", scores)
-print("Mean: ", scores.mean())
-print("Standard Deviation: ", scores.std())
+    y_prob = m.predict_proba(X_test)[:, 1] if name in ["BernoulliNB", "NuSVC"] else m._predict_proba_lr(X_test)[:, 1]
+    
+    print("ROC-AUC Score:", roc_auc_score(y_test, y_prob))
+    fpr, tpr, thresholds = roc_curve(y_test, y_prob)
+    roc_auc_val = auc(fpr, tpr)
 
-# Predictions
-y_pred = perceptron.predict(X_test)
-y_prob = perceptron._predict_proba_lr(X_test)[:, 1]
+    print(f"Time taken: {time.time() - t_start} seconds")
 
-# confusion matrix
-conf_matrix = confusion_matrix(y_test, y_pred)
-print("\nConfusion Matrix:\n", conf_matrix)
+    distances = np.sqrt(fpr**2 + (1 - tpr)**2)
+    min_idx = np.argmin(distances)
+    min_distance = distances[min_idx]
+    closest_fpr = fpr[min_idx]
+    closest_tpr = tpr[min_idx]
 
-# classification report
-class_report = classification_report(y_test, y_pred)
-print("Classification Report:\n", class_report)
+    plt.figure()
+    plt.plot(fpr, tpr, label="ROC curve (AUC = %0.6f)" % roc_auc_val)
+    plt.plot([0, 1], [0, 1], "k--")
 
-# AUC-ROC
-roc_auc = roc_auc_score(y_test, y_prob)
-print("AUC-ROC: ", roc_auc)
+    # Add red line from (0,1) to the closest point on the ROC curve
+    plt.plot([0, closest_fpr], [1, closest_tpr], "r-", linewidth=2, 
+            label=f"Best ({closest_fpr:.4f}, {closest_tpr:.4f})")
 
-# ROC Curve
-fpr, tpr, thresholds = roc_curve(y_test, y_prob)
-roc_auc_val = auc(fpr, tpr)
-print("AUC (computed): ", roc_auc_val)
+    # Add distance annotation
+    mid_x = closest_fpr / 2
+    mid_y = (1 + closest_tpr) / 2
+    plt.text(mid_x, mid_y, f"d = {min_distance:.6f}",
+            fontsize=10, color="red",
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="red", alpha=0.6)
+            )
 
-plt.figure()
-plt.plot(fpr, tpr, label="ROC curve (area = %0.2f)" % roc_auc_val)
-plt.plot([0, 1], [0, 1], "k--")
-plt.xlim([0.0, 1.0])
-plt.ylim([0.0, 1.05])
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.title("Receiver Operating Characteristic")
-plt.legend(loc="lower right")
-plt.show()
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.0])
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    plt.title(name)
+    plt.legend(loc="lower right")
+    plt.show()
