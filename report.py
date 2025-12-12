@@ -3,7 +3,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
-import tarfile
 import os
 import sklearn
 from sklearn.preprocessing import StandardScaler
@@ -14,6 +13,7 @@ from sklearn.metrics import confusion_matrix, classification_report, roc_auc_sco
 
 warnings.filterwarnings("ignore")
 
+target_col = "Attrition"
 random_state = 42 #np.random.random()
 
 folder_path = "data"
@@ -217,7 +217,7 @@ final_dataset = preprocess_data(final_dataset,
 # Analysis of Variance and Mutual Information
 ##############################################
 
-def annova_mi_with_target(data, target_column, exclude_patterns=None):
+def anova_mi_with_target(data, target_column, exclude_patterns=None):
     """
     Calculate feature importance using ANOVA F-statistic and Mutual Information
     """
@@ -260,40 +260,11 @@ def annova_mi_with_target(data, target_column, exclude_patterns=None):
     # No need to return both list and Series - caller can get list with .index.tolist()
     return anova_series, mi_series
 
-anova_filtered_scores, mi_filtered_scores = annova_mi_with_target(
+anova_filtered_scores, mi_filtered_scores = anova_mi_with_target(
     final_dataset, 
     "Attrition",
     exclude_patterns=["EmployeeID", "day_of_week", "avg_hours_day_", r"\d{4}-\d{2}-\d{2}_hours"]
-)
-
-print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
-print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
-
-##########
-# Display
-##########
-
-def order_correlation(corr_series , ascending=False):
-    ordered_corr = corr_series.sort_values(ascending=ascending)
-    return ordered_corr
-
-
-# absolute_filtered_corr = filtered_corr.abs()
-# # ordered correlation by absolute value
-# absolute_filtered_corr = filtered_corr.sort_values(ascending=False)
-
-# top_n_related = absolute_filtered_corr.where(absolute_filtered_corr > absolute_filtered_corr.mean(), None).dropna()
-# print(f"\nTop {len(top_n_related)} related features with Attrition:\n{top_n_related}")
-
-# day_of_week_corr = corr_values[[col for col in corr_values.index if "day" in col and ("worked_on" in col or "avg_hours" in col)]]
-# if len(day_of_week_corr) > 0:
-#     # Standardize the values
-#     standardized_values = StandardScaler().fit_transform(day_of_week_corr.values.reshape(-1, 1)).flatten()
-#     day_of_week_corr = pd.Series(standardized_values, index=day_of_week_corr.index)
-#     print(f"\nDay-of-week correlations with Attrition:\n{day_of_week_corr}")
-
-# final_dataset = final_dataset[ordered_cols]
-target_col = "Attrition"
+    )
 
 # Ensure Attrition is numeric
 if final_dataset[target_col].dtype == "object":
@@ -311,6 +282,14 @@ print(f"\nTraining with processed data. Shape: {X_train.shape}")
 perceptron = Perceptron(max_iter=2000, random_state=random_state)
 # Train the model
 perceptron.fit(X_train, y_train)
+
+
+##########
+# Display
+##########
+
+print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
+print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
 
 # Cross validation
 scores = cross_val_score(perceptron, X_train, y_train, cv=5, scoring="accuracy")
