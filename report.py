@@ -338,7 +338,7 @@ print(f"\nTop 20 Features by ANOVA F-score:")
 print(feature_scores.head(20))
 
 # Select top features
-top_k = 15
+top_k = len(feature_scores) 
 top_features = feature_scores.head(top_k).index.tolist()
 
 print(f"\n✅ Selected {top_k} features")
@@ -350,6 +350,10 @@ X_test_selected = X_test[top_features]
 
 print(f"X_train: {X_train.shape} → {X_train_selected.shape}")
 print(f"X_test: {X_test.shape} → {X_test_selected.shape}")
+
+# reorder columns based on feature importance
+X_train_selected = X_train_selected[feature_scores.head(top_k).index]
+X_test_selected = X_test_selected[feature_scores.head(top_k).index]
 
 ##############################
 # SMOTE (AFTER Feature Selection)
@@ -585,7 +589,56 @@ for name, m in models.items():
     plt.title(f"{name} - ROC Curve\nF1={f1_opt:.3f}, Precision={precision_opt:.3f}, Recall={recall_opt:.3f}", fontsize=14)
     plt.legend(loc="lower right", fontsize=10)
     plt.grid(True, alpha=0.3)
-    # plt.show()
+    plt.show()
+    
+    # Feature Importance Analysis
+    print("\n" + "="*70)
+    print("🔍 STEP 6: Feature Importance Analysis")
+    print("="*70)
+    
+    # Get feature coefficients (weights) from the Perceptron
+    if hasattr(m, 'coef_'):
+        feature_importance = pd.DataFrame({
+            'Feature': top_features,
+            'Coefficient': m.coef_[0],
+            'Abs_Coefficient': np.abs(m.coef_[0])
+        })
+        
+        # Sort by absolute value (impact regardless of direction)
+        feature_importance = feature_importance.sort_values('Abs_Coefficient', ascending=False)
+        
+        print("\n📊 Top 15 Features by Impact on Model:")
+        print("="*70)
+        for idx, row in feature_importance.iterrows():
+            direction = "↑ increases" if row['Coefficient'] > 0 else "↓ decreases"
+            print(f"{row['Feature']:30s} | Weight: {row['Coefficient']:+7.4f} | {direction} attrition risk")
+        
+        print(f"\n💡 Interpretation:")
+        print(f"   • Positive weights (+) → Feature increases attrition probability")
+        print(f"   • Negative weights (−) → Feature decreases attrition probability")
+        print(f"   • Larger absolute values → Stronger impact on predictions")
+        
+        # Visualize feature importance
+        plt.figure(figsize=(12, 8))
+        colors = ['red' if x > 0 else 'green' for x in feature_importance['Coefficient']]
+        plt.barh(range(len(feature_importance)), feature_importance['Coefficient'], color=colors, alpha=0.7)
+        plt.yticks(range(len(feature_importance)), feature_importance['Feature'])
+        plt.xlabel('Coefficient Value (Impact on Attrition)', fontsize=12)
+        plt.ylabel('Feature', fontsize=12)
+        plt.title(f'{name} - Feature Importance\nRed = Increases Attrition Risk | Green = Decreases Attrition Risk', fontsize=14)
+        plt.axvline(x=0, color='black', linestyle='--', linewidth=1)
+        plt.grid(True, alpha=0.3, axis='x')
+        plt.tight_layout()
+        plt.show()
+        
+        # Summary statistics
+        print(f"\n📈 Feature Importance Statistics:")
+        print(f"   • Most impactful (positive): {feature_importance.iloc[0]['Feature']} (+{feature_importance.iloc[0]['Coefficient']:.4f})")
+        print(f"   • Most protective (negative): {feature_importance.loc[feature_importance['Coefficient'].idxmin()]['Feature']} ({feature_importance['Coefficient'].min():.4f})")
+        print(f"   • Average absolute impact: {feature_importance['Abs_Coefficient'].mean():.4f}")
+        print(f"   • Std dev of impact: {feature_importance['Abs_Coefficient'].std():.4f}")
+    else:
+        print("⚠️  Model does not have feature coefficients (not a linear model)")
     
 print("\n" + "="*70)
 print("✅ OPTIMIZATION COMPLETE!")
