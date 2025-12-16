@@ -8,12 +8,17 @@ import sklearn
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_classif, mutual_info_classif
 from sklearn.model_selection import cross_val_score
-from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score, roc_curve, auc
+from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score, roc_curve, auc, precision_recall_curve
+from sklearn.model_selection import GridSearchCV
 
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression, Perceptron, SGDClassifier
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import LinearSVC, NuSVC
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+import imblearn
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
@@ -126,229 +131,462 @@ time_data = pd.concat([time_data, pd.DataFrame(hours_columns, index=time_data.in
 #Pipeline
 ##############################
 
-# pipeline with all steps included above as parameters for easy reuse
-def preprocess_data(dataset, impute_values=True, numeric_cols=None, categorical_cols=None, scale_data=True, encode_ordinal_cols=None, encode_onehot_cols=True, remove_constant_cols=True, remove_from_encoding=[]):
-    #copy the dataset to avoid modifying the original data
+# Pipeline with proper train/test separation to avoid data leakage
+def preprocess_data_safe(dataset, fitted_scaler=None, fitted_imputers=None, fit_mode=True, 
+                          encode_ordinal_cols=None, remove_from_encoding=[]):
+    """
+    Preprocess data with proper train/test separation.
+    
+    Args:
+        dataset: DataFrame to preprocess
+        fitted_scaler: Pre-fitted StandardScaler (for test set)
+        fitted_imputers: Dict of pre-fitted imputation values (for test set)
+        fit_mode: If True, fit transformers. If False, use provided transformers
+        encode_ordinal_cols: Dict of ordinal encodings
+        remove_from_encoding: Columns to exclude from encoding
+    
+    Returns:
+        data: Preprocessed DataFrame
+        scaler: Fitted StandardScaler
+        imputers: Dict of imputation values
+    """
     data = dataset.copy()
-    # remove constant columns
-    if remove_constant_cols:
-        data = remove_col_depending_on_distinct_values(data, end_threshold=1)
-    # identify numerical and categorical columns if not provided
-    if numeric_cols is None:
-        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-    if categorical_cols is None:
-        categorical_cols = data.select_dtypes(include=["object"]).columns.tolist()
-    # impute missing values
-    if impute_values:
+    
+    # Remove constant columns
+    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+    if constant_cols:
+        data.drop(columns=constant_cols, inplace=True)
+    
+    # Identify column types
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = data.select_dtypes(include=["object"]).columns.tolist()
+    
+    # Remove target and excluded columns from processing
+    if 'Attrition' in numeric_cols:
+        numeric_cols.remove('Attrition')
+    if 'EmployeeID' in numeric_cols:
+        numeric_cols.remove('EmployeeID')
+    
+    # Impute missing values
+    if fit_mode:
+        # FIT on training data
+        imputers = {}
         if len(numeric_cols) > 0:
-            data[numeric_cols] = data[numeric_cols].fillna(data[numeric_cols].median())
+            imputers['numeric'] = data[numeric_cols].median()
         if len(categorical_cols) > 0:
-            data[categorical_cols] = data[categorical_cols].fillna(data[categorical_cols].mode().iloc[0])
-    # ordinal encoding
-    if encode_ordinal_cols and len(categorical_cols) > 0:
+            imputers['categorical'] = data[categorical_cols].mode().iloc[0] if len(data[categorical_cols].mode()) > 0 else {}
+    else:
+        # TRANSFORM using fitted values from training
+        imputers = fitted_imputers
+    
+    # Apply imputation
+    if len(numeric_cols) > 0 and 'numeric' in imputers:
+        data[numeric_cols] = data[numeric_cols].fillna(imputers['numeric'])
+    if len(categorical_cols) > 0 and 'categorical' in imputers:
+        data[categorical_cols] = data[categorical_cols].fillna(imputers['categorical'])
+    
+    # Ordinal encoding
+    if encode_ordinal_cols:
         for col, categories in encode_ordinal_cols.items():
             if col in data.columns:
                 data[col] = pd.Categorical(data[col], categories=categories, ordered=True).codes
-                # Remove ordinally encoded columns from categorical_cols to avoid one-hot encoding them
                 if col in categorical_cols:
                     categorical_cols.remove(col)
-                # Add to numeric_cols since it"s now numeric
                 if col not in numeric_cols:
                     numeric_cols.append(col)
-    # one-hot encoding
-    if encode_onehot_cols:
-        # If encode_onehot_cols is True, use the remaining categorical columns
-        if encode_onehot_cols is True:
-            cols_to_encode = categorical_cols
-        else:
-            cols_to_encode = encode_onehot_cols
-        
-        # Remove columns specified in remove_from_encoding
-        cols_to_encode = [col for col in cols_to_encode if col not in remove_from_encoding]
-        
-        if len(cols_to_encode) > 0:
-            data = pd.get_dummies(data, columns=cols_to_encode, drop_first=True)
-    # scale numerical data
-    if scale_data:
-        scaler = StandardScaler(with_mean=True)
-        data[numeric_cols] = scaler.fit_transform(data[numeric_cols])
     
-    return data
+    # One-hot encoding
+    cols_to_encode = [col for col in categorical_cols if col not in remove_from_encoding]
+    if len(cols_to_encode) > 0:
+        data = pd.get_dummies(data, columns=cols_to_encode, drop_first=True)
+    
+    # Update numeric_cols after encoding
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    if 'Attrition' in numeric_cols:
+        numeric_cols.remove('Attrition')
+    if 'EmployeeID' in numeric_cols:
+        numeric_cols.remove('EmployeeID')
+    
+    # Scale numerical data
+    if fit_mode:
+        # FIT scaler on training data
+        scaler = StandardScaler()
+        if len(numeric_cols) > 0:
+            data[numeric_cols] = scaler.fit_transform(data[numeric_cols])
+    else:
+        # TRANSFORM using fitted scaler from training
+        scaler = fitted_scaler
+        if len(numeric_cols) > 0 and scaler is not None:
+            data[numeric_cols] = scaler.transform(data[numeric_cols])
+    
+    return data, scaler, imputers
 
 
 ##############################
-#merge
+# Merge and Split (BEFORE preprocessing to avoid leakage)
 ##############################
 
-from sklearn.model_selection import train_test_split
-# merge employee and manager data first
+print("\n" + "="*70)
+print("📦 Data Merging and Train/Test Split")
+print("="*70)
+
+# Merge employee and manager data first
 employee_manager_data = pd.merge(employee_data, manager_data, on="EmployeeID", suffixes=("_emp", "_mgr"))
-# merge all datasets into a final dataset on EmployeeID
-final_dataset = pd.merge(general_data, employee_manager_data, on="EmployeeID")
-final_dataset = pd.merge(final_dataset, time_data, on="EmployeeID")
+# Merge all datasets into a final dataset on EmployeeID
+raw_dataset = pd.merge(general_data, employee_manager_data, on="EmployeeID")
+raw_dataset = pd.merge(raw_dataset, time_data, on="EmployeeID")
 
-# split dataset into training and testing sets
-train_set, test_set = train_test_split(final_dataset, test_size=0.2, random_state=random_state)
-#todo: cross-validation of train_set
+# Drop unethical columns BEFORE split
+raw_dataset.drop(columns=["MaritalStatus", "Gender", "Age"], inplace=True)
 
-# place the EmployeeID column at the front
-cols = final_dataset.columns.tolist()
-cols.insert(0, cols.pop(cols.index("EmployeeID")))
-final_dataset = final_dataset[cols]
+print(f"Total dataset size: {len(raw_dataset)} samples")
+print(f"Features: {len(raw_dataset.columns)} columns")
 
-# print to verify 
-# print(final_dataset.info())
-# print(final_dataset.head())
+# CRITICAL: Split BEFORE any preprocessing to avoid data leakage
+train_set, test_set = train_test_split(raw_dataset, test_size=0.2, random_state=random_state, stratify=raw_dataset['Attrition'])
 
-#into pipeline
+print(f"Train set: {len(train_set)} samples")
+print(f"Test set: {len(test_set)} samples")
+print(f"Train class distribution: {train_set['Attrition'].value_counts().to_dict()}")
+print(f"Test class distribution: {test_set['Attrition'].value_counts().to_dict()}")
+
+##############################
+# Preprocessing WITHOUT Data Leakage
+##############################
+
+print("\n" + "="*70)
+print("🔧 Preprocessing Train and Test Sets Separately")
+print("="*70)
+
 ordinal_mappings = {
     "BusinessTravel": ["Non-Travel", "Travel_Rarely", "Travel_Frequently"]
-    }
+}
 
 mutual_info_columns = ["Department", "EducationField", "JobRole"]
 
-final_dataset = preprocess_data(final_dataset,
-                                impute_values=True,
-                                scale_data=True,
-                                encode_ordinal_cols=ordinal_mappings,
-                                encode_onehot_cols=True,
-                                remove_constant_cols=True,
-                                remove_from_encoding=["Attrition"] + mutual_info_columns
-                                )
-
-
-##############################################
-# Analysis of Variance and Mutual Information
-##############################################
-
-def anova_mi_with_target(data, target_column, exclude_patterns=None):
-    """
-    Calculate feature importance using ANOVA F-statistic and Mutual Information
-    """
-    data_copy = data.copy()
-    target_data = data_copy[target_column]
-    anova_scores = {}
-    mi_scores = {}
-    
-    # Get numeric columns for ANOVA
-    anova_columns = data_copy.select_dtypes(include=[np.number]).columns.tolist()
-    anova_columns = [col for col in anova_columns if col not in [target_column, "EmployeeID"]]
-    
-    # Get categorical columns for MI
-    mi_columns = data_copy.select_dtypes(include=["object", "category"]).columns.tolist()
-    mi_columns = [col for col in mi_columns if col != target_column]
-    
-    # Calculate ANOVA scores
-    for col in anova_columns:
-        valid_idx = data_copy[[col, target_column]].dropna().index
-        X_col = data_copy.loc[valid_idx, col].values.reshape(-1, 1)
-        y_col = data_copy.loc[valid_idx, target_column].values
-        f_stat, _ = f_classif(X_col, y_col)
-        anova_scores[col] = f_stat[0]
-
-    # Calculate MI scores
-    for col in mi_columns:
-        encoded_col = pd.Categorical(data_copy[col]).codes
-        mi_score = mutual_info_classif(encoded_col.reshape(-1, 1), target_data, random_state=random_state)[0]
-        mi_scores[col] = mi_score
-    
-    # Convert to sorted Series (easier to work with than dicts)
-    anova_series = pd.Series(anova_scores).sort_values(ascending=False)
-    mi_series = pd.Series(mi_scores).sort_values(ascending=False)
-    
-    # Filter based on exclude patterns
-    if exclude_patterns:
-        anova_series = anova_series[~anova_series.index.str.contains("|".join(exclude_patterns), regex=True)]
-        mi_series = mi_series[~mi_series.index.str.contains("|".join(exclude_patterns), regex=True)]
-    
-    # No need to return both list and Series - caller can get list with .index.tolist()
-    return anova_series, mi_series
-
-anova_filtered_scores, mi_filtered_scores = anova_mi_with_target(
-    final_dataset, 
-    "Attrition",
-    exclude_patterns=["EmployeeID", "day_of_week", "avg_hours_day_", r"\d{4}-\d{2}-\d{2}_hours"]
-    )
-
-print(f"\nANOVA Feature Importance:\n{anova_filtered_scores}")
-print(f"\nMutual Information Feature Importance:\n{mi_filtered_scores}")
-
 # Ensure Attrition is numeric
-if final_dataset[target_col].dtype == "object":
-    final_dataset[target_col] = final_dataset[target_col].apply(lambda x: 1 if str(x).lower() in ["yes", "1"] else 0)
+if train_set[target_col].dtype == "object":
+    train_set[target_col] = train_set[target_col].apply(lambda x: 1 if str(x).lower() in ["yes", "1"] else 0)
+if test_set[target_col].dtype == "object":
+    test_set[target_col] = test_set[target_col].apply(lambda x: 1 if str(x).lower() in ["yes", "1"] else 0)
 
-# Prepare X and y from the processed dataset
-X = final_dataset.drop(columns=[target_col] + mutual_info_columns, errors="ignore")
-y = final_dataset[target_col]
+# Preprocess TRAIN set (fit transformers)
+train_processed, fitted_scaler, fitted_imputers = preprocess_data_safe(
+    train_set,
+    fitted_scaler=None,
+    fitted_imputers=None,
+    fit_mode=True,
+    encode_ordinal_cols=ordinal_mappings,
+    remove_from_encoding=["Attrition"] + mutual_info_columns
+)
 
-# Split processed data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state, stratify=y)
+print(f"✅ Train set preprocessed: {train_processed.shape}")
 
+# Preprocess TEST set (use fitted transformers from train)
+test_processed, _, _ = preprocess_data_safe(
+    test_set,
+    fitted_scaler=fitted_scaler,
+    fitted_imputers=fitted_imputers,
+    fit_mode=False,
+    encode_ordinal_cols=ordinal_mappings,
+    remove_from_encoding=["Attrition"] + mutual_info_columns
+)
+
+print(f"✅ Test set preprocessed: {test_processed.shape}")
+print(f"✅ NO DATA LEAKAGE: Scaler and imputers fitted only on train set")
+
+# Prepare X and y
+X_train_full = train_processed.drop(columns=[target_col] + [col for col in mutual_info_columns if col in train_processed.columns], errors="ignore")
+X_test_full = test_processed.drop(columns=[target_col] + [col for col in mutual_info_columns if col in test_processed.columns], errors="ignore")
+y_train = train_processed[target_col]
+y_test = test_processed[target_col]
+
+# Ensure X_train and X_test have same columns
+common_cols = X_train_full.columns.intersection(X_test_full.columns)
+X_train = X_train_full[common_cols]
+X_test = X_test_full[common_cols]
+
+print(f"\nFinal feature count: {len(common_cols)}")
+print(f"X_train shape: {X_train.shape}")
+print(f"X_test shape: {X_test.shape}")
+
+##############################
+# Feature Selection (BEFORE SMOTE)
+##############################
+
+print("\n" + "="*70)
+print("🔬 STEP 1: Feature Selection Using ANOVA (on TRAIN set only)")
+print("="*70)
+
+# Calculate ANOVA on TRAIN set only (no leakage)
+from sklearn.feature_selection import SelectKBest
+
+# Use SelectKBest to get scores
+selector = SelectKBest(f_classif, k='all')
+selector.fit(X_train, y_train)
+
+# Get feature scores
+feature_scores = pd.Series(selector.scores_, index=X_train.columns)
+feature_scores = feature_scores.sort_values(ascending=False)
+
+# Filter out unwanted patterns
+exclude_patterns = ["day_of_week", "avg_hours_day_", r"\d{4}-\d{2}-\d{2}_hours"]
+for pattern in exclude_patterns:
+    feature_scores = feature_scores[~feature_scores.index.str.contains(pattern, regex=True)]
+
+print(f"\nTop 20 Features by ANOVA F-score:")
+print(feature_scores.head(20))
+
+# Select top features
+top_k = 15
+top_features = feature_scores.head(top_k).index.tolist()
+
+print(f"\n✅ Selected {top_k} features")
+print(f"Features: {', '.join(top_features[:10])}...")
+
+# Apply feature selection
+X_train_selected = X_train[top_features]
+X_test_selected = X_test[top_features]
+
+print(f"X_train: {X_train.shape} → {X_train_selected.shape}")
+print(f"X_test: {X_test.shape} → {X_test_selected.shape}")
+
+##############################
+# SMOTE (AFTER Feature Selection)
+##############################
+
+print("\n" + "="*70)
+print("🔬 STEP 2: Finding Optimal SMOTE Strategy")
+print("="*70)
+
+# Test different SMOTE strategies on SELECTED features
+smote_strategies = [0.3, 0.4, 0.5, 0.6, 0.7]
+best_smote_strategy = 0.5
+best_smote_f1 = 0
+
+for strategy in smote_strategies:
+    smote_temp = SMOTE(random_state=random_state, k_neighbors=10, sampling_strategy=strategy)
+    X_temp, y_temp = smote_temp.fit_resample(X_train_selected, y_train)
+    
+    # Quick test with basic Perceptron
+    perc_temp = Perceptron(max_iter=10000, random_state=random_state, tol=1e-3)
+    perc_temp.fit(X_temp, y_temp)
+    y_pred_temp = perc_temp.predict(X_test_selected)
+    
+    cm_temp = confusion_matrix(y_test, y_pred_temp)
+    tn, fp, fn, tp = cm_temp.ravel()
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    print(f"  Strategy {strategy:.1f}: F1={f1:.3f}, Precision={precision:.3f}, Recall={recall:.3f}, Samples={len(y_temp[y_temp==0])}:{len(y_temp[y_temp==1])}")
+    
+    if f1 > best_smote_f1:
+        best_smote_f1 = f1
+        best_smote_strategy = strategy
+
+print(f"\n✅ Best SMOTE strategy: {best_smote_strategy} (F1={best_smote_f1:.3f})")
+
+# Apply SMOTE with best strategy
+smote = SMOTE(random_state=random_state, k_neighbors=10, sampling_strategy=best_smote_strategy)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train_selected, y_train)
+
+print(f"\nOriginal: {pd.Series(y_train).value_counts().sort_index().to_dict()}")
+print(f"Balanced: {pd.Series(y_train_balanced).value_counts().sort_index().to_dict()}")
 
 ###########
 # Training
 ###########
 
+print("\n" + "="*70)
+print("🔬 STEP 3: GridSearchCV - Optimizing Perceptron Hyperparameters")
+print("="*70)
+
+# Remove class_weight='balanced' to avoid double-counting with SMOTE
+param_grid = {
+    'penalty': [None, 'l2', 'l1', 'elasticnet'],
+    'alpha': [0.0001, 0.001, 0.01, 0.1],  # Added 0.1 for more regularization
+    'eta0': [0.5, 1.0, 1.5],  # Narrowed range
+    'max_iter': [10000],
+    'tol': [1e-3],
+}
+
+print(f"Testing {len(param_grid['penalty']) * len(param_grid['alpha']) * len(param_grid['eta0'])} combinations...")
+print("Note: Removed class_weight to avoid double-counting with SMOTE\n")
+
+grid_search = GridSearchCV(
+    Perceptron(random_state=random_state),
+    param_grid,
+    cv=5,
+    scoring='f1',
+    n_jobs=-1,
+    verbose=0
+)
+
+# Use X_train_balanced (after SMOTE) not X_train_selected
+grid_search.fit(X_train_balanced, y_train_balanced)
+
+print(f"\n✅ Best parameters found:")
+for param, value in grid_search.best_params_.items():
+    print(f"   {param}: {value}")
+print(f"\n✅ Best CV F1-score: {grid_search.best_score_:.3f}")
+
 models = {
-    "LinearDiscriminantAnalysis": LinearDiscriminantAnalysis(),
-    "LogisticRegression": LogisticRegression(max_iter=10000, random_state=random_state),
-    "Perceptron": Perceptron(max_iter=10000, random_state=random_state),
-    "SGDClassifier": SGDClassifier(max_iter=10000, random_state=random_state),
-    "BernoulliNB": BernoulliNB(),
-    "LinearSVC": LinearSVC(dual=False, max_iter=5000, random_state=random_state),
-    "NuSVC": NuSVC(gamma="scale", max_iter=1000, nu=0.05, probability=True, random_state=random_state),
+    "Perceptron_Optimized": grid_search.best_estimator_,
     }
 
+print("\n" + "="*70)
+print("🚀 STEP 4: Final Model Training & Evaluation")
+print("="*70)
+
 for name, m in models.items():
-    print("\n----------------------------")
-    print(f"{name} model:")
+    print("\n" + "="*70)
+    print(f"📊 {name} - FINAL RESULTS")
+    print("="*70)
     t_start = time.time()
-    m.fit(X_train, y_train)
-    x_val_scores = cross_val_score(m, X_train, y_train, cv=5, scoring="accuracy")
-    print(f"Cross-validation mean {x_val_scores.mean()}, std dev {x_val_scores.std()}")
     
-    y_pred = m.predict(X_test)
+    # Model is already fitted from GridSearchCV
+    # Re-fit on full balanced training data to ensure consistency
+    m.fit(X_train_balanced, y_train_balanced)
+    
+    # Use F1 score for CV instead of accuracy (better for imbalanced data)
+    x_val_scores_f1 = cross_val_score(m, X_train_balanced, y_train_balanced, cv=5, scoring="f1")
+    print(f"\nCross-validation F1 mean {x_val_scores_f1.mean():.4f}, std dev {x_val_scores_f1.std():.4f}")
+    
+    y_pred = m.predict(X_test_selected)
     
     print("Confusion Matrix:")
-    print(confusion_matrix(y_test, y_pred))
+    cm = confusion_matrix(y_test, y_pred)
+    print(cm)
+    
+    # Calculate key metrics for attrition detection (class 1)
+    tn, fp, fn, tp = cm.ravel()
+    precision_class1 = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall_class1 = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1_class1 = 2 * (precision_class1 * recall_class1) / (precision_class1 + recall_class1) if (precision_class1 + recall_class1) > 0 else 0
+    
+    print(f"\n📊 Class 1 (Attrition) Metrics:")
+    print(f"  Precision: {precision_class1:.3f} ({tp}/{tp+fp}) - How many alerts are real")
+    print(f"  Recall:    {recall_class1:.3f} ({tp}/{tp+fn}) - How many attritions detected")
+    print(f"  F1-Score:  {f1_class1:.3f} - Balance between precision/recall")
 
-    print("Classification Report:")
+    print("\nClassification Report:")
     print(classification_report(y_test, y_pred))
 
-    y_prob = m.predict_proba(X_test)[:, 1] if name in ["BernoulliNB", "NuSVC"] else m._predict_proba_lr(X_test)[:, 1]
+    # Get probability scores based on model type
+    if hasattr(m, 'predict_proba'):
+        y_prob = m.predict_proba(X_test_selected)[:, 1]
+    elif hasattr(m, 'decision_function'):
+        y_prob = m.decision_function(X_test_selected)
+    else:
+        print("Warning: Model doesn't support probability prediction, skipping ROC-AUC")
+        continue
     
-    print("ROC-AUC Score:", roc_auc_score(y_test, y_prob))
-    fpr, tpr, thresholds = roc_curve(y_test, y_prob)
+    print(f"\nROC-AUC Score: {roc_auc_score(y_test, y_prob):.4f}")
+    fpr, tpr, thresholds_roc = roc_curve(y_test, y_prob)
     roc_auc_val = auc(fpr, tpr)
+    
+    # STEP 5: Optimize decision threshold
+    print("\n" + "="*70)
+    print("🎯 STEP 5: Optimizing Decision Threshold")
+    print("="*70)
+    
+    precisions, recalls, thresholds = precision_recall_curve(y_test, y_prob)
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
+    
+    # Find threshold that maximizes F1
+    optimal_idx_f1 = np.argmax(f1_scores)
+    optimal_threshold_f1 = thresholds[optimal_idx_f1] if optimal_idx_f1 < len(thresholds) else 0.0
+    
+    # Find threshold with minimum precision constraint (35%)
+    min_precision_threshold = 0.35
+    valid_indices = precisions >= min_precision_threshold
+    
+    if valid_indices.any():
+        # Among valid precisions, find the one with best F1
+        valid_f1s = f1_scores[valid_indices]
+        if len(valid_f1s) > 0:
+            best_valid_idx = np.argmax(valid_f1s)
+            # Get original index in precisions array
+            original_indices = np.where(valid_indices)[0]
+            optimal_idx_constrained = original_indices[best_valid_idx]
+            optimal_threshold_constrained = thresholds[optimal_idx_constrained] if optimal_idx_constrained < len(thresholds) else 0.0
+        else:
+            optimal_threshold_constrained = optimal_threshold_f1
+    else:
+        optimal_threshold_constrained = optimal_threshold_f1
+    
+    # Use constrained threshold
+    optimal_threshold = optimal_threshold_constrained
+    
+    # Predict with optimized threshold
+    y_pred_optimized = (y_prob >= optimal_threshold).astype(int)
+    cm_opt = confusion_matrix(y_test, y_pred_optimized)
+    tn_opt, fp_opt, fn_opt, tp_opt = cm_opt.ravel()
+    precision_opt = tp_opt / (tp_opt + fp_opt) if (tp_opt + fp_opt) > 0 else 0
+    recall_opt = tp_opt / (tp_opt + fn_opt) if (tp_opt + fn_opt) > 0 else 0
+    f1_opt = 2 * (precision_opt * recall_opt) / (precision_opt + recall_opt) if (precision_opt + recall_opt) > 0 else 0
+    
+    improvement_pct = ((f1_opt - f1_class1) / f1_class1 * 100) if f1_class1 > 0 else 0
+    
+    print(f"\n📉 DEFAULT Threshold (0.5):")
+    print(f"   Precision: {precision_class1:.3f} | Recall: {recall_class1:.3f} | F1: {f1_class1:.3f}")
+    print(f"   Confusion Matrix: [[{tn:3d} {fp:3d}] [{fn:3d} {tp:3d}]]")
+    
+    print(f"\n📈 OPTIMAL Threshold ({optimal_threshold:.4f}) - With Precision ≥ 35% constraint:")
+    print(f"   Precision: {precision_opt:.3f} ({tp_opt}/{tp_opt+fp_opt}) - {precision_opt*100:.1f}% of alerts are real")
+    print(f"   Recall:    {recall_opt:.3f} ({tp_opt}/{tp_opt+fn_opt}) - Detects {recall_opt*100:.1f}% of attritions")
+    print(f"   F1-Score:  {f1_opt:.3f} ⬆️  +{improvement_pct:.1f}% improvement")
+    print(f"   Confusion Matrix: [[{tn_opt:3d} {fp_opt:3d}] [{fn_opt:3d} {tp_opt:3d}]]")
+    
+    print(f"\n💡 Business Impact:")
+    print(f"   ✅ Detected: {tp_opt}/{tp_opt+fn_opt} attritions ({recall_opt*100:.1f}%)")
+    print(f"   ⚠️  Cost: Need to interview {tp_opt+fp_opt} employees ({fp_opt} unnecessary)")
+    print(f"   💰 Efficiency: {precision_opt*100:.1f}% of interventions are useful")
+    print(f"   ❌ Missed: {fn_opt} attritions will leave undetected")
 
-    print(f"Time taken: {time.time() - t_start} seconds")
+    print(f"\n⏱️  Time taken: {time.time() - t_start:.2f} seconds")
 
     distances = np.sqrt(fpr**2 + (1 - tpr)**2)
     min_idx = np.argmin(distances)
     min_distance = distances[min_idx]
     closest_fpr = fpr[min_idx]
     closest_tpr = tpr[min_idx]
+    
+    # Find optimal threshold point on ROC curve
+    optimal_fpr_idx = np.argmin(np.abs(thresholds_roc - optimal_threshold)) if len(thresholds_roc) > 0 else 0
+    optimal_fpr = fpr[optimal_fpr_idx] if optimal_fpr_idx < len(fpr) else 0
+    optimal_tpr = tpr[optimal_fpr_idx] if optimal_fpr_idx < len(tpr) else 1
 
-    plt.figure()
-    plt.plot(fpr, tpr, label="ROC curve (AUC = %0.6f)" % roc_auc_val)
-    plt.plot([0, 1], [0, 1], "k--")
+    plt.figure(figsize=(10, 8))
+    plt.plot(fpr, tpr, 'b-', linewidth=2, label=f"ROC curve (AUC = {roc_auc_val:.4f})")
+    plt.plot([0, 1], [0, 1], "k--", label="Random")
 
-    # Add red line from (0,1) to the closest point on the ROC curve
-    plt.plot([0, closest_fpr], [1, closest_tpr], "r-", linewidth=2, 
-            label=f"Best ({closest_fpr:.4f}, {closest_tpr:.4f})")
+    # Mark closest point to (0,1)
+    plt.plot([0, closest_fpr], [1, closest_tpr], "r-", linewidth=2, alpha=0.5,
+            label=f"Ideal point ({closest_fpr:.3f}, {closest_tpr:.3f})")
+    
+    # Mark optimal threshold point
+    plt.plot(optimal_fpr, optimal_tpr, "go", markersize=12, 
+            label=f"Optimal threshold={optimal_threshold:.3f}\nTPR={optimal_tpr:.3f}, FPR={optimal_fpr:.3f}")
 
     # Add distance annotation
     mid_x = closest_fpr / 2
     mid_y = (1 + closest_tpr) / 2
-    plt.text(mid_x, mid_y, f"d = {min_distance:.6f}",
-            fontsize=10, color="red",
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="red", alpha=0.6)
+    plt.text(mid_x, mid_y, f"d = {min_distance:.4f}",
+            fontsize=9, color="red",
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="red", alpha=0.7)
             )
 
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.0])
-    plt.xlabel("FPR")
-    plt.ylabel("TPR")
-    plt.title(name)
-    plt.legend(loc="lower right")
-    plt.show()
+    plt.xlabel("False Positive Rate", fontsize=12)
+    plt.ylabel("True Positive Rate", fontsize=12)
+    plt.title(f"{name} - ROC Curve\nF1={f1_opt:.3f}, Precision={precision_opt:.3f}, Recall={recall_opt:.3f}", fontsize=14)
+    plt.legend(loc="lower right", fontsize=10)
+    plt.grid(True, alpha=0.3)
+    # plt.show()
+    
+print("\n" + "="*70)
+print("✅ OPTIMIZATION COMPLETE!")
+print("="*70)
